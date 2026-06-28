@@ -1,0 +1,3 @@
+# loopengine has zero runtime dependencies (standard library only).
+# Dev/test tooling:
+pytest>=7.0
