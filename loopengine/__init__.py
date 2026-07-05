@@ -9,6 +9,14 @@ from .state import LoopState, Observation, Decision, ActionResult, Reflection
 from .controller import LoopController, LoopConfig, StopReason
 from .guardrails import Guardrail, GuardrailError, BudgetExceeded
 from .replay import TraceRecorder, replay_trace
+from .reasoners import (
+    LLMClient,
+    DeterministicLLMClient,
+    LLMReasoner,
+    CrewReasoner,
+    crewai_available,
+    stable_key,
+)
 
 __all__ = [
     "LoopState",
@@ -24,6 +32,12 @@ __all__ = [
     "BudgetExceeded",
     "TraceRecorder",
     "replay_trace",
+    "LLMClient",
+    "DeterministicLLMClient",
+    "LLMReasoner",
+    "CrewReasoner",
+    "crewai_available",
+    "stable_key",
 ]
 
 __version__ = "0.1.0"
