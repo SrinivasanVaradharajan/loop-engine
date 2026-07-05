@@ -31,7 +31,7 @@ it** that keeps the loop bounded, auditable, and reproducible.
 | Phase | Question it answers | In this repo |
 |-------|--------------------|--------------|
 | **Sense** | "What is true right now?" | `Sensor.sense()` → `Observation` |
-| **Reason** | "What should I do next?" | `RuleReasoner.reason()` → `Decision` |
+| **Reason** | "What should I do next?" | `RuleReasoner` / `LLMReasoner` / `CrewReasoner` → `Decision` |
 | **Act** | "Do it (with guardrails)." | `Actuator.act()` → `ActionResult` |
 | **Reflect** | "Did it help? Am I done?" | `Reflector.reflect()` → `Reflection` |
 
@@ -75,35 +75,90 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-The suite proves the four properties that matter:
+The suite proves the properties that matter:
 
 - `test_loop_converges` — the loop reaches a fully valid record.
 - `test_determinism_same_trace_hash` — two runs produce a **byte-identical** trace.
 - `test_budget_is_a_hard_stop` — autonomy is bounded by budget.
 - `test_guardrail_blocks_unapproved_action` — policy halts the loop safely.
+- `test_reasoners.py` — Rule, LLM, and Crew reasoners all converge to the **same
+  record** in the same iterations, each internally deterministic (the seam holds).
 
 ---
 
-## Wiring in a real model
+## Three reasoners, one seam
 
-The `Reasoner` protocol is the only seam you change to go from rules to an LLM:
+The `Reasoner` protocol is the **only** seam you change to evolve the brain of the
+loop. `loop-engine` ships three implementations of it — all honouring the identical
+contract `reason(state, obs) -> Decision`, so the controller never knows which one
+is behind the seam:
 
-```python
-class LLMReasoner:
-    def reason(self, state, obs):
-        resp = my_llm.complete(prompt=build_prompt(state, obs))
-        action = parse(resp)
-        return Decision(
-            action=action.name,
-            arguments=action.args,
-            rationale=action.why,
-            confidence=action.confidence,
-            idempotency_key=f"{action.name}:{stable_hash(action.args)}",
-        )
+| Reasoner | Inside REASON | When to reach for it |
+|----------|---------------|----------------------|
+| `RuleReasoner` | hand-written regex | deterministic baseline / cheapest path |
+| `LLMReasoner` | one model call → parsed JSON | open-ended reasoning, still one shot |
+| `CrewReasoner` | a crew of agents (Extractor → Auditor) | work that needs specialists collaborating |
+
+Run all three on the same loop and watch the seam hold — identical record, identical
+iteration count:
+
+```bash
+python -m examples.reasoner_swap
 ```
 
-Everything else — budgets, guardrails, idempotency, replay — stays exactly the same.
-That separation is the whole point: **let the model be creative; keep the loop deterministic.**
+```
+REASONER       ITERS  STOP        CONVERGED  TRACE(16)
+--------------------------------------------------------------------
+RuleReasoner   4      converged   True       59300832edab42a4
+LLMReasoner    4      converged   True       53194adddb7c3233
+CrewReasoner   4      converged   True       c8aacb0db41f14c2
+
+FINAL RECORD : {'customer_id': '88421', 'amount': 1250.0, 'currency': 'USD', 'intent': 'refund'}
+ALL REASONERS AGREE: True (customer_id/amount/currency/intent)
+```
+
+Each reasoner is internally deterministic (same reasoner, two runs → same digest);
+different reasoners agree on the *outcome* while narrating it differently.
+
+### 1 · LLM reasoner
+
+`LLMReasoner` turns an `Observation` into a `Decision` via a single model call.
+It depends only on a tiny `LLMClient` protocol (`complete(prompt) -> str`), so you
+can point it at OpenAI, Bedrock, Vertex, a local vLLM server — anything. For tests
+and demos, `DeterministicLLMClient` stands in for the model so runs stay offline and
+reproducible:
+
+```python
+from loopengine import LLMReasoner, DeterministicLLMClient
+
+reasoner = LLMReasoner(DeterministicLLMClient(extract))   # swap for a real client
+# class MyClient:  def complete(self, prompt: str) -> str: return openai_call(prompt)
+```
+
+### 2 · Crew reasoner (CrewAI)
+
+`CrewReasoner` promotes REASON into a **crew**: an Extractor proposes a value and an
+Auditor validates and scores it. The crew still returns exactly one `Decision`, so
+the loop is unchanged. It runs a deterministic **local crew** by default, and shows
+the real **CrewAI** API when you opt in:
+
+```python
+from loopengine import CrewReasoner
+
+reasoner = CrewReasoner(extract, use_crewai=False)   # deterministic local crew
+# reasoner = CrewReasoner(extract, use_crewai=True)  # real crewai (needs an LLM)
+```
+
+The five determinism controls scale with the crew: **budgets** → `max_rpm` /
+delegation depth, **stop conditions** → per-agent task completion, **guardrails** →
+validate every inter-agent handoff, **idempotency** → content-addressed keys keep
+retried tool calls safe, **replay** → log each agent's I/O. The warning label:
+nondeterminism compounds with every agent, so pin seeds/temperatures and prefer
+sequential handoffs for anything you must audit.
+
+> **Contract, not magic:** rules today, an LLM tomorrow, a crew the day after —
+> the controller, budgets, guardrails, idempotency, and replay never change.
+> Let the model (or the crew) be creative; keep the loop deterministic.
 
 ## Project layout
 
@@ -112,14 +167,29 @@ loop-engine/
 ├── loopengine/
 │   ├── state.py        # immutable phase I/O + LoopState (the control 'process variable')
 │   ├── phases.py       # Sense/Reason/Act/Reflect protocols + Agent bundle
+│   ├── reasoners.py    # LLMReasoner + CrewReasoner (CrewAI) behind one seam
 │   ├── guardrails.py   # Budget + Guardrail policy primitives
 │   ├── controller.py   # the deterministic engine (stop conditions live here)
 │   └── replay.py       # tracing + deterministic replay/digest
 ├── examples/
-│   └── self_correcting_extractor.py
+│   ├── self_correcting_extractor.py   # the base loop (RuleReasoner)
+│   └── reasoner_swap.py               # Rule vs LLM vs Crew on the same loop
 └── tests/
-    └── test_controller.py
+    ├── test_controller.py
+    └── test_reasoners.py
 ```
+
+## Optional: real CrewAI
+
+The core engine is dependency-free. To exercise the real CrewAI path
+(`CrewReasoner(extract, use_crewai=True)`) install the extra and configure an LLM:
+
+```bash
+pip install crewai   # requires a configured model/provider to run kickoff()
+```
+
+Without it, `CrewReasoner` automatically uses its deterministic local crew, so the
+example and tests run anywhere.
 
 ## License
 

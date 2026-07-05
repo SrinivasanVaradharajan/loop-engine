@@ -1,3 +1,7 @@
 # loopengine has zero runtime dependencies (standard library only).
 # Dev/test tooling:
 pytest>=7.0
+
+# Optional: enables CrewReasoner(use_crewai=True). Not needed for the examples
+# or tests, which use a deterministic local crew.
+# crewai>=0.28
